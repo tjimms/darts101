@@ -151,11 +151,11 @@
       <!-- Score Cards -->
       <div id="score-cards" class="grid grid-cols-2 gap-4 md:gap-6"></div>
 
-      <!-- NEW: Checkout panel (white text on dark blue) -->
+      <!-- Checkout panel (now shows for ALL players, not just current) -->
       <div id="checkout-panel" class="hidden rounded-2xl shadow-xl p-4 md:p-5 bg-dart-navy-light text-white">
         <div class="flex items-center justify-between gap-3">
-          <p class="text-sm font-semibold tracking-wide">Possible throw outs</p>
-          <p class="text-xs text-white/70">Double-out only</p>
+          <p class="text-sm font-semibold tracking-wide">Possible checkouts</p>
+          <p class="text-xs text-white/70">Top 3 (double-out)</p>
         </div>
         <div id="checkout-options" class="mt-3 space-y-3"></div>
       </div>
@@ -185,9 +185,18 @@
           <button id="backspace-btn" class="h-14 text-lg font-semibold bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors">←</button>
         </div>
 
-        <button id="submit-btn" class="w-full h-14 text-lg font-semibold bg-dart-bordeaux hover:bg-dart-bordeaux-hover text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled>
-          SUBMIT SCORE
-        </button>
+        <!-- Undo + Submit -->
+    <div class="space-y-2">
+      <button id="submit-btn" class="w-full h-14 text-lg font-semibold bg-dart-bordeaux hover:bg-dart-bordeaux-hover text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+        SUBMIT SCORE
+      </button>
+
+      <button id="undo-btn"
+        class="w-full text-sm font-semibold text-gray-500 hover:text-gray-700 underline underline-offset-4 disabled:opacity-50 disabled:no-underline disabled:cursor-not-allowed"
+        disabled>
+        Undo last score
+      </button>
+    </div>
       </div>
     </div>
 
@@ -220,15 +229,25 @@
     let currentPlayerIndex = 0;
     let inputValue = '';
 
+    // NEW: set/leg starter rotation (omstebeurt)
+    let currentSetIndex = 0;      // 0-based
+    let currentLegInSet = 0;      // 0-based
+    let setStarterIndex = 0;      // who starts the set's first leg
+    let legStarterIndex = 0;      // who starts the current leg
+
+    // NEW: undo stack (snapshot-based)
+    const actionStack = [];
+
     // DOM Elements
     const setupScreen = document.getElementById('setup-screen');
     const gameScreen = document.getElementById('game-screen');
     const winnerScreen = document.getElementById('winner-screen');
     const scoreDisplay = document.getElementById('score-display');
     const submitBtn = document.getElementById('submit-btn');
+    const undoBtn = document.getElementById('undo-btn');
     const toast = document.getElementById('toast');
 
-    // NEW: checkout DOM
+    // checkout DOM
     const checkoutPanel = document.getElementById('checkout-panel');
     const checkoutOptions = document.getElementById('checkout-options');
 
@@ -238,7 +257,8 @@
       setupPlayerButtons();
       setupGameControls();
       setupNumberPad();
-      setupKeyboardInput(); // keyboard numbers + enter/backspace/esc
+      setupKeyboardInput();
+      setupUndo();
     });
 
     // Game Type Selection
@@ -341,13 +361,19 @@
       document.getElementById('submit-btn').addEventListener('click', submitScore);
     }
 
-    // Keyboard input support (digits, Enter, Backspace, Esc)
+    // Keyboard input support (digits, Enter, Backspace, Esc, Ctrl/Cmd+Z)
     function setupKeyboardInput() {
       document.addEventListener('keydown', (e) => {
         if (gameScreen.classList.contains('hidden')) return;
 
         const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
         if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+          undoLastAction();
+          e.preventDefault();
+          return;
+        }
 
         if (e.key >= '0' && e.key <= '9') {
           if (inputValue.length < 3) {
@@ -372,11 +398,16 @@
           return;
         }
 
-        if (e.key === 'Enter') {
-          if (!submitBtn.disabled) submitScore();
-          e.preventDefault();
-          return;
+      if (e.key === 'Enter') {
+        // If nothing typed, treat as 0
+        if (!inputValue) {
+          inputValue = '0';
+          updateScoreDisplay();
         }
+        submitScore();
+        e.preventDefault();
+        return;
+      }
       });
     }
 
@@ -385,8 +416,7 @@
       submitBtn.disabled = !inputValue;
     }
 
-    // ===== helpers for attempts + 3-dart average =====
-    // history stores per-turn scores (each submit = one 3-dart turn)
+    // ===== attempts + 3-dart average =====
     function getThreeDartAverage(player) {
       const turns = player.history.length;
       if (!turns) return 0;
@@ -401,32 +431,50 @@
       return prefix + recent.join(', ');
     }
 
-    // ===== NEW: checkout helpers (DOUBLE-OUT ONLY) =====
+    // ===== checkout helpers (DOUBLE-OUT ONLY) =====
     function scoreIsCheckoutCandidate(score) {
-      // double-out: avoid 1, and show common checkout range (2..170)
       return score >= 2 && score <= 170 && score !== 1;
     }
 
     function getAllDarts() {
-      // Darts usable on dart 1/2: S, D, T, and bulls (25/50)
       const darts = [];
-
       for (let n = 1; n <= 20; n++) darts.push({ label: `S${n}`, value: n });
       for (let n = 1; n <= 20; n++) darts.push({ label: `D${n}`, value: 2 * n });
       for (let n = 1; n <= 20; n++) darts.push({ label: `T${n}`, value: 3 * n });
-
       darts.push({ label: 'SBULL', value: 25 });
       darts.push({ label: 'BULL', value: 50 });
-
       return darts;
     }
 
     function getFinishingDarts() {
-      // Final dart MUST be a double (bull=50 allowed)
       const finishes = [];
       for (let n = 1; n <= 20; n++) finishes.push({ label: `D${n}`, value: 2 * n });
       finishes.push({ label: 'BULL', value: 50 });
       return finishes;
+    }
+
+    // Heuristic "most common" ranking (not a full checkout-table)
+    function dartCommonnessScore(d) {
+      // Prefer typical setup shots and T20 routes
+      const order = {
+        T20: 200, T19: 190, T18: 180, T17: 170, T16: 160, T15: 150,
+        T14: 140, T13: 130, T12: 120, T11: 110, T10: 100,
+        BULL: 95, SBULL: 60,
+        D20: 90, D16: 88, D18: 86, D12: 84, D10: 82, D8: 80, D6: 78, D4: 76, D2: 74,
+      };
+      return order[d.label] ?? (
+        d.label.startsWith('T') ? 70 :
+        d.label.startsWith('D') ? 55 :
+        d.label.startsWith('S') ? 30 : 10
+      );
+    }
+
+    function lineCommonnessScore(line) {
+      // More weight on earlier darts; keep it simple
+      const a = line[0] ? dartCommonnessScore(line[0]) : 0;
+      const b = line[1] ? dartCommonnessScore(line[1]) : 0;
+      const c = line[2] ? dartCommonnessScore(line[2]) : 0;
+      return a * 1.0 + b * 0.6 + c * 0.3 - (line.length - 1) * 5;
     }
 
     function getCheckoutOptions(remaining, maxOptions = 3) {
@@ -461,16 +509,15 @@
         }
       }
 
-      // Sort: fewer darts first, then higher first dart, then higher second dart
+      // Sort by "commonness" first, then fewer darts, then higher opening dart
       results.sort((x, y) => {
+        const cx = lineCommonnessScore(x);
+        const cy = lineCommonnessScore(y);
+        if (cy !== cx) return cy - cx;
         if (x.length !== y.length) return x.length - y.length;
-        const xv0 = x[0]?.value ?? 0, yv0 = y[0]?.value ?? 0;
-        if (yv0 !== xv0) return yv0 - xv0;
-        const xv1 = x[1]?.value ?? 0, yv1 = y[1]?.value ?? 0;
-        return yv1 - xv1;
+        return (y[0]?.value ?? 0) - (x[0]?.value ?? 0);
       });
 
-      // De-dupe by string
       const seen = new Set();
       const formatted = [];
       for (const line of results) {
@@ -481,39 +528,102 @@
         }
         if (formatted.length >= maxOptions) break;
       }
-
       return formatted;
     }
 
-function renderCheckoutPanel() {
-  if (!playerScores.length) return;
+    // Now shows checkout options for ALL players (including non-thrower)
+    function renderCheckoutPanel() {
+      if (!playerScores.length) return;
 
-  const p = playerScores[currentPlayerIndex];
-  const options = getCheckoutOptions(p.score, 6); // change 6 to how many you want
+      const rows = playerScores
+        .map((p, idx) => {
+          const options = getCheckoutOptions(p.score, 3);
+          if (!options.length) return null;
 
-  if (!options.length) {
-    checkoutPanel.classList.add('hidden');
-    checkoutOptions.innerHTML = '';
-    return;
-  }
+          const isCurrent = idx === currentPlayerIndex;
+          return `
+            <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2 ${isCurrent ? 'ring-2 ring-white/20 rounded-xl p-3 bg-white/5' : 'rounded-xl p-3 bg-white/0'}">
+              <div class="text-sm font-semibold">
+                ${p.name}
+                <span class="text-white/70 font-medium">(${p.score})</span>
+                ${isCurrent ? '<span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-white/10 border border-white/15">throwing</span>' : ''}
+              </div>
+              <div class="flex flex-wrap gap-2">
+                ${options.map(opt => `
+                  <span class="px-3 py-1 rounded-full bg-white/10 border border-white/15 text-sm font-semibold tracking-wide">
+                    ${opt}
+                  </span>
+                `).join('')}
+              </div>
+            </div>
+          `;
+        })
+        .filter(Boolean);
 
-  checkoutPanel.classList.remove('hidden');
+      if (!rows.length) {
+        checkoutPanel.classList.add('hidden');
+        checkoutOptions.innerHTML = '';
+        return;
+      }
 
-  checkoutOptions.innerHTML = `
-    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-      <div class="text-sm font-semibold">
-        ${p.name} <span class="text-white/70 font-medium">(${p.score})</span>
-      </div>
-      <div class="flex flex-wrap gap-2">
-        ${options.map(opt => `
-          <span class="px-3 py-1 rounded-full bg-white/10 border border-white/15 text-sm font-semibold tracking-wide">
-            ${opt}
-          </span>
-        `).join('')}
-      </div>
-    </div>
-  `;
-}
+      checkoutPanel.classList.remove('hidden');
+      checkoutOptions.innerHTML = rows.join('');
+    }
+
+    // ===== starter rotation helpers =====
+    function computeSetStarterIndex() {
+      const n = playerScores.length || 2;
+      return currentSetIndex % n;
+    }
+
+    function computeLegStarterIndex() {
+      const n = playerScores.length || 2;
+      return (setStarterIndex + currentLegInSet) % n;
+    }
+
+    function applyStartersForCurrentLeg() {
+      setStarterIndex = computeSetStarterIndex();
+      legStarterIndex = computeLegStarterIndex();
+      currentPlayerIndex = legStarterIndex;
+    }
+
+    // ===== undo helpers =====
+    function deepClone(obj) {
+      return JSON.parse(JSON.stringify(obj));
+    }
+
+    function pushSnapshot() {
+      actionStack.push({
+        playerScores: deepClone(playerScores),
+        currentPlayerIndex,
+        currentSetIndex,
+        currentLegInSet,
+        setStarterIndex,
+        legStarterIndex,
+      });
+      undoBtn.disabled = actionStack.length === 0;
+    }
+
+    function setupUndo() {
+      undoBtn.addEventListener('click', undoLastAction);
+    }
+
+    function undoLastAction() {
+      if (!actionStack.length) return;
+      const snap = actionStack.pop();
+      playerScores = snap.playerScores;
+      currentPlayerIndex = snap.currentPlayerIndex;
+      currentSetIndex = snap.currentSetIndex;
+      currentLegInSet = snap.currentLegInSet;
+      setStarterIndex = snap.setStarterIndex;
+      legStarterIndex = snap.legStarterIndex;
+
+      inputValue = '';
+      updateScoreDisplay();
+      renderScoreCards();
+      undoBtn.disabled = actionStack.length === 0;
+      showToast('Undone. Enter a new score.');
+    }
 
     // Game Logic
     function startGame() {
@@ -540,8 +650,18 @@ function renderCheckoutPanel() {
         history: []
       }));
 
-      currentPlayerIndex = 0;
+      // reset starters/rotation
+      currentSetIndex = 0;
+      currentLegInSet = 0;
+      setStarterIndex = 0;
+      legStarterIndex = 0;
+      applyStartersForCurrentLeg();
+
+      // reset input/undo
       inputValue = '';
+      actionStack.length = 0;
+      undoBtn.disabled = true;
+
       updateScoreDisplay();
       renderScoreCards();
       updateGameInfo();
@@ -590,16 +710,17 @@ function renderCheckoutPanel() {
         `;
       }).join('');
 
-      document.getElementById('current-turn').textContent = `${playerScores[currentPlayerIndex].name}'s turn`;
+      document.getElementById('current-turn').textContent =
+        `${playerScores[currentPlayerIndex].name}'s turn`;
 
-      // NEW: update checkout panel whenever cards render
       renderCheckoutPanel();
     }
 
     function updateGameInfo() {
       const setsToWin = Math.ceil(sets / 2);
       const legsToWin = Math.ceil(legs / 2);
-      document.getElementById('game-info').textContent = `First to ${setsToWin} sets (${legsToWin} legs per set)`;
+      document.getElementById('game-info').textContent =
+        `First to ${setsToWin} sets (${legsToWin} legs per set)`;
     }
 
     function submitScore() {
@@ -609,6 +730,9 @@ function renderCheckoutPanel() {
         showToast('Invalid score - Max is 180');
         return;
       }
+
+      // snapshot BEFORE applying the score (so undo restores everything)
+      pushSnapshot();
 
       const currentPlayer = playerScores[currentPlayerIndex];
       const newScore = currentPlayer.score - score;
@@ -668,19 +792,30 @@ function renderCheckoutPanel() {
     }
 
     function resetLeg() {
+      // next leg within the set -> starter alternates
+      currentLegInSet++;
+
       playerScores.forEach(p => {
         p.score = gameType;
         p.history = [];
       });
+
+      applyStartersForCurrentLeg();
       renderScoreCards();
     }
 
     function resetSet() {
+      // next set -> starter alternates (setStarter flips in 2P; modulo for N players)
+      currentSetIndex++;
+      currentLegInSet = 0;
+
       playerScores.forEach(p => {
         p.score = gameType;
         p.legsWon = 0;
         p.history = [];
       });
+
+      applyStartersForCurrentLeg();
       renderScoreCards();
     }
 
